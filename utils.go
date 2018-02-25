@@ -1,15 +1,17 @@
 package lightauth
 
 import (
-	"math/rand"
+	"net/http"
 )
 
-func randSeq(n int) string {
-	chars := []rune("0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ")
-
-	b := make([]rune, n)
-	for i := range b {
-		b[i] = chars[rand.Intn(len(chars))]
+func readHeader(h http.Header, header string) string {
+	_value, headerExists := h[header]
+	var value string
+	if !headerExists {
+		value = ""
+	} else {
+		value = _value[0]
 	}
-	return string(b)
+
+	return value
 }
