@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"log"
 	"os"
 
 	"github.com/BurntSushi/toml"
@@ -13,15 +14,30 @@ import (
 )
 
 var (
-	clientStore           = make(map[string]*path)
-	serverStore           = make(map[string]*route)
+	clientStore           map[string]*Path
+	serverStore           map[string]*Route
 	conn                  *grpc.ClientConn
 	lightningClient       lnrpc.LightningClient
 	lightningClientStream lnrpc.Lightning_SendPaymentClient
 	lightningServerStream lnrpc.Lightning_SubscribeInvoicesClient
+	database              DataProvider
 )
 
-type routeInfo struct {
+// Record is an interface that superclasses all entities stored in a permanent store
+type Record interface {
+	save() error
+}
+
+// DataProvider is an interface that specifies the methods required to store data
+type DataProvider interface {
+	Create(Record) (string, error)
+	Edit(Record)
+	GetServerData() (map[string]*Route, error)
+	GetClientData() (map[string]*Path, error)
+}
+
+// RouteInfo is the bare fields that details a route
+type RouteInfo struct {
 	Name        string
 	Fee         int
 	MaxInvoices int
@@ -33,30 +49,27 @@ type tomlConfig struct {
 	ServerAddr         string
 	CAFile             string
 	ServerHostOverride string
-	Routes             map[string]*routeInfo
+	Routes             map[string]*RouteInfo
 }
 
 func startRPCClient() tomlConfig {
 	var conf tomlConfig
 	if _, err := toml.DecodeFile("lightauth.toml", &conf); err != nil {
-		fmt.Fprintf(os.Stderr, "error: Could not parse lightauth.toml %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Lightauth error: Could not parse lightauth.toml: %v\n", err)
 	}
 
 	var opts []grpc.DialOption
 
 	creds, err := credentials.NewClientTLSFromFile(conf.CAFile, conf.ServerHostOverride)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: Failed to create TLS credentials %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Lightauth error: Failed to create TLS credentials: %v\n", err)
 	}
 
 	opts = append(opts, grpc.WithTransportCredentials(creds))
 
 	conn, err = grpc.Dial(conf.ServerAddr, opts...)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Lightauth error: Failed to start grpc connection: %v\n", err)
 	}
 
 	lightningClient = lnrpc.NewLightningClient(conn)
@@ -65,15 +78,20 @@ func startRPCClient() tomlConfig {
 }
 
 // StartClientConnection is used to initiate the connection with the LDN node on a client's behalf.
-func StartClientConnection() *grpc.ClientConn {
+func StartClientConnection(db DataProvider) *grpc.ClientConn {
+	database = db
 	startRPCClient()
 
-	ctxb := context.Background()
 	var err error
+	clientStore, err = db.GetClientData()
+	if err != nil {
+		log.Fatalf("Lightauth error: could not fetch data from store: %v\n", err)
+	}
+
+	ctxb := context.Background()
 	lightningClientStream, err = lightningClient.SendPayment(ctxb)
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Lightauth error: Failed to start lightning client stream: %v\n", err)
 	}
 
 	go func() {
@@ -84,12 +102,12 @@ func StartClientConnection() *grpc.ClientConn {
 			}
 
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				log.Fatalf("Lightauth error: There was an error receiving data from the lightning client stream: %v\n", err)
 			}
 
 			if paymentResponse != nil {
 				if paymentResponse.PaymentError != "" {
-					fmt.Fprintf(os.Stderr, "error: %v\n", err)
+					log.Printf("Lightauth error: Lightning payment contains an error: %v\n", err)
 				} else {
 					confirmInvoiceSettled(paymentResponse.PaymentPreimage)
 				}
@@ -103,28 +121,44 @@ func StartClientConnection() *grpc.ClientConn {
 // StartServerConnection is used to initiate the connection with the LDN node on a server's behalf.
 // It requires lightauth.toml to be populated with the connection params and
 // the routes.
-func StartServerConnection() *grpc.ClientConn {
+func StartServerConnection(db DataProvider) *grpc.ClientConn {
+	database = db
 	conf := startRPCClient()
 
+	var err error
+	serverStore, err = db.GetServerData()
+	if err != nil {
+		log.Fatalf("Lightauth error: could not fetch data from store: %v\n", err)
+	}
+
 	for _, v := range conf.Routes {
-		serverStore[v.Name] = &route{
-			clients: make(map[string]*client),
-			routeInfo: routeInfo{
-				Name:        v.Name,
-				Fee:         v.Fee,
-				MaxInvoices: v.MaxInvoices,
-				Mode:        v.Mode,
-				Period:      v.Period,
-			},
+		if _, exists := serverStore[v.Name]; !exists {
+			// TODO: Delete from store those routes not in toml
+			r := &Route{
+				Clients: make(map[string]*Client),
+				RouteInfo: RouteInfo{
+					Name:        v.Name,
+					Fee:         v.Fee,
+					MaxInvoices: v.MaxInvoices,
+					Mode:        v.Mode,
+					Period:      v.Period,
+				},
+			}
+
+			err := r.save()
+			if err != nil {
+				fmt.Println("Here")
+				os.Exit(1)
+			}
+
+			serverStore[v.Name] = r
 		}
 	}
 
 	ctxb := context.Background()
-	var err error
 	lightningServerStream, err = lightningClient.SubscribeInvoices(ctxb, &lnrpc.InvoiceSubscription{})
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "error: %v\n", err)
-		os.Exit(1)
+		log.Fatalf("Lightauth error: Failed to start lightning client stream: %v\n", err)
 	}
 
 	go func() {
@@ -135,7 +169,7 @@ func StartServerConnection() *grpc.ClientConn {
 			}
 
 			if err != nil {
-				fmt.Fprintf(os.Stderr, "error: %v\n", err)
+				log.Printf("Lightauth error: There was an error receiving data from the lightning client stream: %v\n", err)
 			}
 
 			if invoiceUpdate != nil && invoiceUpdate.Settled {
