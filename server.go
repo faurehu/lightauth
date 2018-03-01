@@ -23,6 +23,7 @@ const (
 	mISSINGPREIMAGE       = "Lightauth error: Missing pre_image"
 	tRYAGAIN              = "Lightauth error: We can't validate your payment yet, please try again"
 	iNVOICEALREADYCLAIMED = "Lightauth error: Invoice has already been claimed"
+	sOMETHINGWENTWRONG    = "Lightauth error: Something went wrong"
 )
 
 // Route is a hash that stores all the information of a specific endpoint
@@ -42,42 +43,29 @@ func (r *Route) save() error {
 	return nil
 }
 
-// Invoice is a hash that stores all the information of an invoice
-type Invoice struct {
-	Client         *Client
-	PaymentRequest string
-	PaymentHash    []byte
-	Fee            int
-	Settled        bool
-	PreImage       []byte
-	Claimed        bool
-	Path           *Path
-	Mux            sync.Mutex
-	ID             string
-}
-
-func (i *Invoice) save() error {
-	if i.ID == "" {
-		var err error
-		i.ID, err = database.Create(i)
-		if err != nil {
-			return err
-		}
-	} else {
-		database.Edit(i)
-	}
-
-	return nil
-}
-
 // Client is a hash that stores all the information of a server's client
 type Client struct {
-	Token    string
-	Expires  time.Time
-	Invoices map[string]*Invoice
-	Route    *Route
-	ID       string
-	Mux      sync.Mutex
+	Token          string
+	ExpirationTime time.Time
+	Invoices       map[string]*Invoice
+	Route          *Route
+	ID             string
+	mux            sync.Mutex
+}
+
+func (c *Client) setExpirationTime(t time.Time) error {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
+	c.ExpirationTime = t
+	return c.save()
+}
+
+func (c *Client) getExpirationTime() time.Time {
+	c.mux.Lock()
+	defer c.mux.Unlock()
+
+	return c.ExpirationTime
 }
 
 func (c *Client) save() error {
@@ -122,24 +110,20 @@ func writeClientHeaders(w http.ResponseWriter, c *Client) error {
 
 	if c.Route.Mode == "time" {
 		// RFC3339
-		w.Header().Set("Light-Auth-Expiration-Time", c.Expires.Format("2006-01-02T15:04:05Z07:00"))
+		w.Header().Set("Light-Auth-Expiration-Time", c.ExpirationTime.Format("2006-01-02T15:04:05Z07:00"))
 	}
 
 	return err
 }
 
-func updateInvoice(paymentRequest string) {
+func updateInvoice(paymentRequest string) error {
 	for _, r := range serverStore {
 		for _, c := range r.Clients {
 			if i, invoiceExists := c.Invoices[paymentRequest]; invoiceExists {
-				i.Mux.Lock()
-				i.Settled = true
-				err := i.save()
+				err := i.settle([]byte{})
 				if err != nil {
-					// This is serious. We have been notified that an invoice has been payed successfully,
-					// But it can't be saved in the database
+					return err
 				}
-				i.Mux.Unlock()
 
 				if c.Route.Mode == "time" {
 					timePeriod := time.Millisecond
@@ -155,36 +139,28 @@ func updateInvoice(paymentRequest string) {
 					}
 
 					t := time.Now()
-					if c.Expires.After(t) {
-						diff := c.Expires.Sub(t)
-						c.Mux.Lock()
-						c.Expires = t.Add(timePeriod).Add(diff)
-						c.Mux.Unlock()
-					} else {
-						c.Mux.Lock()
-						c.Expires = t.Add(timePeriod)
-						c.Mux.Unlock()
+					expirationTime := c.getExpirationTime()
+					if expirationTime.After(t) {
+						diff := expirationTime.Sub(t)
+						return c.setExpirationTime(t.Add(timePeriod).Add(diff))
 					}
-					err := c.save()
-					if err != nil {
-						// This is serious. We have been notified that an invoice has been payed successfully,
-						// But it can't be saved in the database
-					}
+
+					return c.setExpirationTime(t.Add(timePeriod))
 				}
 			}
 		}
 	}
+
+	return nil
 }
 
 func (c *Client) getUnpayedInvoices() ([]string, error) {
 	unpayedInvoices := []string{}
 	for _, i := range c.Invoices {
-		i.Mux.Lock()
-		if !i.Settled {
+		if !i.isSettled() {
 			unpayedInvoices = append(unpayedInvoices, i.PaymentRequest)
 
 		}
-		i.Mux.Unlock()
 	}
 
 	numUnpayed := len(unpayedInvoices)
@@ -261,24 +237,20 @@ func discreteTypeValidator(c *Client, w http.ResponseWriter, r *http.Request, ha
 		return
 	}
 
-	i.Mux.Lock()
-	settled := i.Settled
-	claimed := i.Claimed
-	i.Mux.Unlock()
-
-	if claimed {
+	if i.isClaimed() {
 		http.Error(w, iNVOICEALREADYCLAIMED, http.StatusBadRequest)
 	}
 
-	if !settled {
+	if !i.isSettled() {
 		http.Error(w, tRYAGAIN, http.StatusConflict)
 		return
 	}
 
-	i.Mux.Lock()
-	i.Claimed = true
-	i.save()
-	i.Mux.Unlock()
+	err = i.claim()
+	if err != nil {
+		http.Error(w, sOMETHINGWENTWRONG, http.StatusInternalServerError)
+		return
+	}
 
 	w.Header().Set("Light-Auth-Invoice", invoiceID)
 
@@ -287,7 +259,7 @@ func discreteTypeValidator(c *Client, w http.ResponseWriter, r *http.Request, ha
 
 func timeTypeValidator(c *Client, w http.ResponseWriter, r *http.Request, handler func(http.ResponseWriter, *http.Request)) {
 	t := time.Now()
-	expired := c.Expires.Before(t)
+	expired := c.ExpirationTime.Before(t)
 	if expired {
 		http.Error(w, tIMEEXPIRED, http.StatusPaymentRequired)
 		return
@@ -313,7 +285,7 @@ func ServerMiddleware(handler func(http.ResponseWriter, *http.Request)) func(htt
 				// Token not found, create new one
 				if _, tokenExists := rt.Clients[token]; !tokenExists {
 					token = uniuri.New()
-					c := &Client{Token: token, Invoices: map[string]*Invoice{}, Expires: time.Now(), Route: rt}
+					c := &Client{Token: token, Invoices: map[string]*Invoice{}, ExpirationTime: time.Now(), Route: rt}
 					err := c.save()
 					if err != nil {
 						log.Printf("Lightauth error: Could not save client: %v\n", err)

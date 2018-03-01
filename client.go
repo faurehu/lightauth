@@ -22,13 +22,36 @@ type Path struct {
 	SyncExpirationTime  time.Time
 	Token               string
 	Invoices            map[string]*Invoice
-	Mux                 sync.Mutex
+	mux                 sync.Mutex
 	Fee                 int
 	TimePeriod          string
 	Mode                string
 	MaxInvoices         int
 	URL                 string
 	ID                  string
+}
+
+func (p *Path) getLocalExpirationTime() time.Time {
+	p.mux.Lock()
+	defer p.mux.Unlock()
+
+	return p.LocalExpirationTime
+}
+
+func (p *Path) setLocalExpirationTime(t time.Time) error {
+	p.mux.Lock()
+	defer p.mux.Unlock()
+
+	p.LocalExpirationTime = t
+	return p.save()
+}
+
+func (p *Path) setSyncExpirationTime(t time.Time) error {
+	p.mux.Lock()
+	defer p.mux.Unlock()
+
+	p.SyncExpirationTime = t
+	return p.save()
 }
 
 func (p *Path) getUnclaimedInvoices() []*Invoice {
@@ -58,17 +81,14 @@ func (p *Path) save() error {
 
 func (p *Path) canRequest() bool {
 	if p.Mode == "time" {
-		p.Mux.Lock()
-		expirationTime := p.LocalExpirationTime
-		p.save()
-		p.Mux.Unlock()
-		return expirationTime.After(time.Now())
+		return p.getLocalExpirationTime().After(time.Now())
 	}
 
 	return len(p.getUnclaimedInvoices()) > 0
 }
 
-func (p *Path) invoiceSettled() {
+// TODO handle error on invoceSettled calls
+func (p *Path) invoiceSettled() error {
 	if p.Mode == "time" {
 		timePeriod := time.Millisecond
 		switch p.TimePeriod {
@@ -82,11 +102,18 @@ func (p *Path) invoiceSettled() {
 			timePeriod = time.Millisecond
 		}
 
-		p.Mux.Lock()
-		p.LocalExpirationTime = p.LocalExpirationTime.Add(timePeriod)
-		p.save()
-		p.Mux.Unlock()
+		t := time.Now()
+		localExpirationTime := p.getLocalExpirationTime()
+
+		if localExpirationTime.After(t) {
+			diff := localExpirationTime.Sub(t)
+			return p.setLocalExpirationTime(t.Add(timePeriod).Add(diff))
+		}
+
+		return p.setLocalExpirationTime(t.Add(timePeriod))
 	}
+
+	return nil
 }
 
 func confirmInvoiceSettled(preImage []byte) {
@@ -96,13 +123,16 @@ func confirmInvoiceSettled(preImage []byte) {
 
 	for _, p := range clientStore {
 		if i, invoiceExists := p.Invoices[paymentHash]; invoiceExists {
-			p.invoiceSettled()
+			err := p.invoiceSettled()
+			if err != nil {
+				// TODO: Consider how to handle this scenario
+			}
 
-			i.Mux.Lock()
-			i.Settled = true
-			i.PreImage = preImage
-			i.save()
-			i.Mux.Unlock()
+			err = i.settle(preImage)
+			if err != nil {
+			}
+
+			break
 		}
 	}
 }
@@ -125,15 +155,17 @@ func ReadResponse(r *http.Response, u string) (*http.Response, error) {
 
 		if store.Mode == "time" {
 			var err error
-			store.Mux.Lock()
-			store.SyncExpirationTime, err = time.Parse("2006-01-02T15:04:05Z07:00", readHeader(r.Header, "Light-Auth-Expiration-Time"))
+			syncExpirationTime, err := time.Parse("2006-01-02T15:04:05Z07:00", readHeader(r.Header, "Light-Auth-Expiration-Time"))
 			if err != nil {
 				log.Printf("Lightauth error: Could not read header: %v\n", err)
-				store.Mux.Unlock()
 				return r, err
 			}
-			store.save()
-			store.Mux.Unlock()
+
+			err = store.setSyncExpirationTime(syncExpirationTime)
+			if err != nil {
+				log.Printf("Lightauth error: Could not save path time: %v\n", err)
+				return r, err
+			}
 		} else {
 			invoiceID := readHeader(r.Header, "Light-Auth-Invoice")
 
@@ -150,10 +182,11 @@ func ReadResponse(r *http.Response, u string) (*http.Response, error) {
 				return r, err
 			}
 
-			claimedInvoice.Mux.Lock()
-			claimedInvoice.Claimed = true
-			claimedInvoice.save()
-			claimedInvoice.Mux.Unlock()
+			err := claimedInvoice.claim()
+			if err != nil {
+				log.Printf("Lightauth error: Could not save invoice: %v\n", err)
+				return r, err
+			}
 		}
 
 		responseInvoices := strings.Split(readHeader(r.Header, "Light-Auth-Invoices"), ",")
@@ -177,14 +210,11 @@ func ReadResponse(r *http.Response, u string) (*http.Response, error) {
 
 			if _, invoiceExists := store.Invoices[paymentHash]; !invoiceExists {
 				i := &Invoice{PaymentRequest: v, Fee: fee, Path: store, PaymentHash: paymentHashByte}
-				i.Mux.Lock()
 				i.save()
-				i.Mux.Unlock()
 
-				store.Mux.Lock()
+				store.mux.Lock()
 				store.Invoices[paymentHash] = i
-				store.save()
-				store.Mux.Unlock()
+				store.mux.Unlock()
 			}
 		}
 
@@ -287,29 +317,25 @@ func ClearRequest(request *http.Request) (*http.Request, error) {
 		if routeStore.SyncExpirationTime.Before(time.Now()) {
 			// TODO: This needs to configure buffer
 			for _, v := range routeStore.Invoices {
-				v.Mux.Lock()
-				if !v.Settled {
+				if !v.isSettled() {
 					err := makePayment(v)
 					if err != nil {
 						// TODO: We need to make sure at least one payment has been made
 						// Otherwise throw error
 					}
 				}
-				v.Mux.Unlock()
 			}
 		}
 	} else {
 		if len(routeStore.getUnclaimedInvoices()) < 1 {
 			// TODO: This needs to configure buffer
 			for _, v := range routeStore.Invoices {
-				v.Mux.Lock()
-				if !v.Settled {
+				if !v.isSettled() {
 					err := makePayment(v)
 					if err != nil {
 						// TODO: We need to make sure at least one payment has been made
 					}
 				}
-				v.Mux.Unlock()
 			}
 		}
 	}
@@ -324,16 +350,13 @@ func ClearRequest(request *http.Request) (*http.Request, error) {
 	if routeStore.Mode == "discrete" {
 		found := false
 		for _, v := range routeStore.Invoices {
-			v.Mux.Lock()
-			if v.Settled && !v.Claimed {
+			if v.isSettled() && !v.isClaimed() {
 				preImage := hex.EncodeToString(v.PreImage)
 				request.Header.Set("Light-Auth-Pre-Image", preImage)
 				request.Header.Set("Light-Auth-Invoice", v.PaymentRequest)
-				v.Mux.Unlock()
 				found = true
 				break
 			}
-			v.Mux.Unlock()
 		}
 
 		if !found {
