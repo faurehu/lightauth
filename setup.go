@@ -107,7 +107,7 @@ func StartClientConnection(db DataProvider) *grpc.ClientConn {
 
 			if paymentResponse != nil {
 				if paymentResponse.PaymentError != "" {
-					log.Printf("Lightauth error: Lightning payment contains an error: %v\n", err)
+					log.Printf("Lightauth error: Lightning payment contains an error: %v\n", paymentResponse.PaymentError)
 				} else {
 					confirmInvoiceSettled(paymentResponse.PaymentPreimage)
 				}

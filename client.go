@@ -4,12 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"log"
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -189,15 +189,20 @@ func ReadResponse(r *http.Response, u string) (*http.Response, error) {
 			}
 		}
 
-		responseInvoices := strings.Split(readHeader(r.Header, "Light-Auth-Invoices"), ",")
 		fee, err := strconv.Atoi(readHeader(r.Header, "Light-Auth-Fee"))
 		if err != nil {
 			log.Printf("Lightauth error: Could not read header: %v\n", err)
 			return r, err
 		}
 
-		for _, v := range responseInvoices {
-			paymentHash, err := getPaymentHash(v)
+		jsonData := []JSONInvoice{}
+		if err := json.Unmarshal([]byte(readHeader(r.Header, "Light-Auth-Invoices")), &jsonData); err != nil {
+			log.Printf("Lightauth error: Could not decode header data: %v\n", err)
+			return r, err
+		}
+
+		for _, v := range jsonData {
+			paymentHash, err := getPaymentHash(v.PaymentRequest)
 			if err != nil {
 				// TODO Server is sending invalid invoice.
 				continue
@@ -209,7 +214,13 @@ func ReadResponse(r *http.Response, u string) (*http.Response, error) {
 			}
 
 			if _, invoiceExists := store.Invoices[paymentHash]; !invoiceExists {
-				i := &Invoice{PaymentRequest: v, Fee: fee, Path: store, PaymentHash: paymentHashByte}
+				i := &Invoice{
+					PaymentRequest: v.PaymentRequest,
+					Fee:            fee,
+					Path:           store,
+					PaymentHash:    paymentHashByte,
+					ExpirationTime: v.ExpirationTime,
+				}
 				i.save()
 
 				store.mux.Lock()
@@ -225,15 +236,21 @@ func ReadResponse(r *http.Response, u string) (*http.Response, error) {
 }
 
 func getInvoicesFromResponse(h http.Header) (map[string]*Invoice, error) {
+	invoices := make(map[string]*Invoice)
 	fee, err := strconv.Atoi(readHeader(h, "Light-Auth-Fee"))
 	if err != nil {
 		log.Printf("Lightauth error: Failed to read header: %v\n", err)
-		return make(map[string]*Invoice), err
+		return invoices, err
 	}
-	invoiceIDs := strings.Split(readHeader(h, "Light-Auth-Invoices"), ",")
-	invoices := make(map[string]*Invoice)
-	for _, v := range invoiceIDs {
-		paymentHash, err := getPaymentHash(v)
+
+	jsonData := []JSONInvoice{}
+	if err := json.Unmarshal([]byte(readHeader(h, "Light-Auth-Invoices")), &jsonData); err != nil {
+		log.Printf("Lightauth error: Could not decode header data: %v\n", err)
+		return invoices, err
+	}
+
+	for _, v := range jsonData {
+		paymentHash, err := getPaymentHash(v.PaymentRequest)
 		if err != nil {
 			// TODO Server is sending invalid invoice.
 			continue
@@ -244,7 +261,13 @@ func getInvoicesFromResponse(h http.Header) (map[string]*Invoice, error) {
 			continue
 		}
 
-		invoices[paymentHash] = &Invoice{PaymentRequest: v, Fee: fee, PaymentHash: paymentHashByte}
+		invoices[paymentHash] = &Invoice{
+			PaymentRequest: v.PaymentRequest,
+			Fee:            fee,
+			PaymentHash:    paymentHashByte,
+			ExpirationTime: v.ExpirationTime,
+		}
+
 		invoices[paymentHash].save()
 	}
 
@@ -350,7 +373,7 @@ func ClearRequest(request *http.Request) (*http.Request, error) {
 	if routeStore.Mode == "discrete" {
 		found := false
 		for _, v := range routeStore.Invoices {
-			if v.isSettled() && !v.isClaimed() {
+			if v.isSettled() && !v.isClaimed() && !v.isExpired() {
 				preImage := hex.EncodeToString(v.PreImage)
 				request.Header.Set("Light-Auth-Pre-Image", preImage)
 				request.Header.Set("Light-Auth-Invoice", v.PaymentRequest)

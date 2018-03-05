@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -100,13 +99,18 @@ func writeClientHeaders(w http.ResponseWriter, c *Client) error {
 		return err
 	}
 
-	unpayedInvoicesRequests := []string{}
+	unpayedInvoicesRequests := []*Invoice{}
 	for _, v := range unpayedInvoices {
 		unpayedInvoicesRequests = append(unpayedInvoicesRequests, v)
 	}
 
+	invoicesJSON, err := getInvoicesJSON(unpayedInvoicesRequests)
+	if err != nil {
+		return err
+	}
+
 	w.Header().Set("Light-Auth-Token", c.Token)
-	w.Header().Set("Light-Auth-Invoices", strings.Join(unpayedInvoicesRequests, ","))
+	w.Header().Set("Light-Auth-Invoices", invoicesJSON)
 
 	if c.Route.Mode == "time" {
 		// RFC3339
@@ -154,11 +158,11 @@ func updateInvoice(paymentRequest string) error {
 	return nil
 }
 
-func (c *Client) getUnpayedInvoices() ([]string, error) {
-	unpayedInvoices := []string{}
+func (c *Client) getUnpayedInvoices() ([]*Invoice, error) {
+	unpayedInvoices := []*Invoice{}
 	for _, i := range c.Invoices {
 		if !i.isSettled() {
-			unpayedInvoices = append(unpayedInvoices, i.PaymentRequest)
+			unpayedInvoices = append(unpayedInvoices, i)
 
 		}
 	}
@@ -167,7 +171,7 @@ func (c *Client) getUnpayedInvoices() ([]string, error) {
 	if numUnpayed < c.Route.MaxInvoices {
 		newInvoices, err := c.generateInvoices(c.Route.MaxInvoices - numUnpayed)
 		if err != nil {
-			return []string{}, err
+			return []*Invoice{}, err
 		}
 
 		unpayedInvoices = append(unpayedInvoices, newInvoices...)
@@ -176,9 +180,9 @@ func (c *Client) getUnpayedInvoices() ([]string, error) {
 	return unpayedInvoices, nil
 }
 
-func (c *Client) generateInvoices(numberOfInvoices int) ([]string, error) {
+func (c *Client) generateInvoices(numberOfInvoices int) ([]*Invoice, error) {
 	ctxb := context.Background()
-	invoices := []string{}
+	invoices := []*Invoice{}
 
 	for i := 0; i < numberOfInvoices; i++ {
 		addInvoiceResponse, err := lightningClient.AddInvoice(ctxb, &lnrpc.Invoice{Value: int64(c.Route.Fee)})
@@ -189,8 +193,9 @@ func (c *Client) generateInvoices(numberOfInvoices int) ([]string, error) {
 
 		invoiceID := addInvoiceResponse.PaymentRequest
 		hash := addInvoiceResponse.RHash
-		i := Invoice{PaymentRequest: invoiceID, Settled: false, PaymentHash: hash, Client: c}
-		invoices = append(invoices, i.PaymentRequest)
+		expirationTime := time.Now().Add(time.Minute * 59)
+		i := Invoice{PaymentRequest: invoiceID, Settled: false, PaymentHash: hash, Client: c, ExpirationTime: expirationTime}
+		invoices = append(invoices, &i)
 		err = i.save()
 		if err != nil {
 			// Couldn't save the invoice, so we will not keep it in store
