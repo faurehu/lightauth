@@ -58,6 +58,8 @@ func startRPCClient() tomlConfig {
 		log.Fatalf("Lightauth error: Could not parse lightauth.toml: %v\n", err)
 	}
 
+	log.Print(conf)
+
 	var opts []grpc.DialOption
 
 	creds, err := credentials.NewClientTLSFromFile(conf.CAFile, conf.ServerHostOverride)
