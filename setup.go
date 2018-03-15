@@ -83,7 +83,7 @@ func startRPCClient() tomlConfig {
 // StartClientConnection is used to initiate the connection with the LDN node on a client's behalf.
 func StartClientConnection(db DataProvider) *grpc.ClientConn {
 	database = db
-	startRPCClient()
+	conf := startRPCClient()
 
 	var err error
 	clientStore, err = db.GetClientData()
@@ -94,7 +94,7 @@ func StartClientConnection(db DataProvider) *grpc.ClientConn {
 	ctxb := context.Background()
 	lightningClientStream, err = lightningClient.SendPayment(ctxb)
 	if err != nil {
-		log.Fatalf("Lightauth error: Failed to start lightning client stream: %v\n", err)
+		log.Fatalf("Lightauth error: Failed to start lightning client stream: %v\n", conf)
 	}
 
 	go func() {
