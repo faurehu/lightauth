@@ -2,7 +2,6 @@ package lightauth
 
 import (
 	"context"
-	"fmt"
 	"io"
 	"log"
 	"os"
@@ -91,7 +90,7 @@ func StartClientConnection(db DataProvider) *grpc.ClientConn {
 	ctxb := context.Background()
 	lightningClientStream, err = lightningClient.SendPayment(ctxb)
 	if err != nil {
-		log.Fatalf("Lightauth error: Failed to start lightning client stream: %v\n", conf)
+		log.Fatalf("Lightauth error: Failed to start lightning client stream: %v\n", err)
 	}
 
 	go func() {
