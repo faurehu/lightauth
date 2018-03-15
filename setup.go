@@ -79,7 +79,7 @@ func startRPCClient() tomlConfig {
 // StartClientConnection is used to initiate the connection with the LDN node on a client's behalf.
 func StartClientConnection(db DataProvider) *grpc.ClientConn {
 	database = db
-	conf := startRPCClient()
+	startRPCClient()
 
 	var err error
 	clientStore, err = db.GetClientData()
