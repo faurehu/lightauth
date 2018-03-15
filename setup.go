@@ -175,7 +175,7 @@ func StartServerConnection(db DataProvider) *grpc.ClientConn {
 			if invoiceUpdate != nil && invoiceUpdate.Settled {
 				err := updateInvoice(invoiceUpdate.PaymentRequest)
 				if err != nil {
-					// TODO: Serious error: we have been notified of a payment but we can't save it in database.
+					// TODO: Serious error: we have been notified of a payment but we can't save it in database. EXCEPTIONAL
 				}
 			}
 		}

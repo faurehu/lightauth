@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"log"
 	"net/http"
 	"strconv"
@@ -95,7 +96,7 @@ func writeConstantHeaders(w http.ResponseWriter, rt RouteInfo) {
 func writeClientHeaders(w http.ResponseWriter, c *Client) error {
 	unpayedInvoices, err := c.getUnpayedInvoices()
 	if err != nil {
-		http.Error(w, "Something went wrong", http.StatusInternalServerError)
+		writeError(w, "Something went wrong", http.StatusInternalServerError)
 		return err
 	}
 
@@ -118,6 +119,11 @@ func writeClientHeaders(w http.ResponseWriter, c *Client) error {
 	}
 
 	return err
+}
+
+func writeError(w http.ResponseWriter, message string, statusCode int) {
+	w.Header().Set("Light-Auth-Status", strconv.Itoa(statusCode))
+	fmt.Fprint(w, message)
 }
 
 func updateInvoice(paymentRequest string) error {
@@ -211,25 +217,25 @@ func discreteTypeValidator(c *Client, w http.ResponseWriter, r *http.Request, ha
 
 	invoiceID := readHeader(r.Header, "Light-Auth-Invoice")
 	if invoiceID == "" {
-		http.Error(w, mISSINGINVOICE, http.StatusBadRequest)
+		writeError(w, mISSINGINVOICE, http.StatusBadRequest)
 		return
 	}
 
 	preImageString := readHeader(r.Header, "Light-Auth-Pre-Image")
 	if preImageString == "" {
-		http.Error(w, mISSINGPREIMAGE, http.StatusBadRequest)
+		writeError(w, mISSINGPREIMAGE, http.StatusBadRequest)
 		return
 	}
 
 	i, invoiceExists := c.Invoices[invoiceID]
 	if !invoiceExists {
-		http.Error(w, iNVALIDCREDENTIALS, http.StatusBadRequest)
+		writeError(w, iNVALIDCREDENTIALS, http.StatusBadRequest)
 		return
 	}
 
 	preImage, err := hex.DecodeString(preImageString)
 	if err != nil {
-		http.Error(w, iNVALIDCREDENTIALS, http.StatusBadRequest)
+		writeError(w, iNVALIDCREDENTIALS, http.StatusBadRequest)
 		return
 	}
 	hasher := sha256.New()
@@ -238,26 +244,27 @@ func discreteTypeValidator(c *Client, w http.ResponseWriter, r *http.Request, ha
 	hexPaymentHash := hex.EncodeToString(i.PaymentHash)
 
 	if hexPreImage != hexPaymentHash {
-		http.Error(w, iNVALIDCREDENTIALS, http.StatusBadRequest)
+		writeError(w, iNVALIDCREDENTIALS, http.StatusBadRequest)
 		return
 	}
 
 	if i.isClaimed() {
-		http.Error(w, iNVOICEALREADYCLAIMED, http.StatusBadRequest)
+		writeError(w, iNVOICEALREADYCLAIMED, http.StatusBadRequest)
 	}
 
 	if !i.isSettled() {
-		http.Error(w, tRYAGAIN, http.StatusConflict)
+		writeError(w, tRYAGAIN, http.StatusConflict)
 		return
 	}
 
 	err = i.claim()
 	if err != nil {
-		http.Error(w, sOMETHINGWENTWRONG, http.StatusInternalServerError)
+		writeError(w, sOMETHINGWENTWRONG, http.StatusInternalServerError)
 		return
 	}
 
 	w.Header().Set("Light-Auth-Invoice", invoiceID)
+	w.Header().Set("Light-Auth-Status", strconv.Itoa(http.StatusOK))
 
 	handler(w, r)
 }
@@ -266,9 +273,11 @@ func timeTypeValidator(c *Client, w http.ResponseWriter, r *http.Request, handle
 	t := time.Now()
 	expired := c.ExpirationTime.Before(t)
 	if expired {
-		http.Error(w, tIMEEXPIRED, http.StatusPaymentRequired)
+		writeError(w, tIMEEXPIRED, http.StatusPaymentRequired)
 		return
 	}
+
+	w.Header().Set("Light-Auth-Status", strconv.Itoa(http.StatusOK))
 
 	handler(w, r)
 }
@@ -294,7 +303,7 @@ func ServerMiddleware(handler func(http.ResponseWriter, *http.Request)) func(htt
 					err := c.save()
 					if err != nil {
 						log.Printf("Lightauth error: Could not save client: %v\n", err)
-						http.Error(w, "Something went wrong", http.StatusInternalServerError)
+						writeError(w, "Something went wrong", http.StatusInternalServerError)
 						return
 					}
 					rt.Clients[token] = c
@@ -308,7 +317,7 @@ func ServerMiddleware(handler func(http.ResponseWriter, *http.Request)) func(htt
 		_, tokenExists := rt.Clients[token]
 		if !tokenExists {
 			// Token doesn't exist
-			http.Error(w, iNVALIDTOKEN, http.StatusBadRequest)
+			writeError(w, iNVALIDTOKEN, http.StatusBadRequest)
 			return
 		}
 

@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"io/ioutil"
 	"log"
 	"net/http"
 	"net/url"
@@ -15,6 +16,8 @@ import (
 
 	"github.com/lightningnetwork/lnd/lnrpc"
 )
+
+var lOOPTHRESHOLD = 500
 
 // Path is a hash that stores all of the routes it is authenticating to
 type Path struct {
@@ -42,16 +45,24 @@ func (p *Path) setLocalExpirationTime(t time.Time) error {
 	p.mux.Lock()
 	defer p.mux.Unlock()
 
+	// if t != p.LocalExpirationTime {
 	p.LocalExpirationTime = t
 	return p.save()
+	// }
+
+	// return nil
 }
 
 func (p *Path) setSyncExpirationTime(t time.Time) error {
 	p.mux.Lock()
 	defer p.mux.Unlock()
 
+	// if t != p.SyncExpirationTime {
 	p.SyncExpirationTime = t
 	return p.save()
+	// }
+
+	// return nil
 }
 
 func (p *Path) getUnclaimedInvoices() []*Invoice {
@@ -87,8 +98,7 @@ func (p *Path) canRequest() bool {
 	return len(p.getUnclaimedInvoices()) > 0
 }
 
-// TODO handle error on invoceSettled calls
-func (p *Path) invoiceSettled() error {
+func (p *Path) updateBalance() error {
 	if p.Mode == "time" {
 		timePeriod := time.Millisecond
 		switch p.TimePeriod {
@@ -123,13 +133,13 @@ func confirmInvoiceSettled(preImage []byte) {
 
 	for _, p := range clientStore {
 		if i, invoiceExists := p.Invoices[paymentHash]; invoiceExists {
-			err := p.invoiceSettled()
+			err := i.settle(preImage)
 			if err != nil {
-				// TODO: Consider how to handle this scenario
 			}
 
-			err = i.settle(preImage)
+			err = p.updateBalance()
 			if err != nil {
+				// TODO: Consider how to handle this scenario EXCEPTIONAL
 			}
 
 			break
@@ -139,19 +149,47 @@ func confirmInvoiceSettled(preImage []byte) {
 
 // ReadResponse will use the information from the response to synchronise info about the protocol status
 func ReadResponse(r *http.Response, u string) (*http.Response, error) {
-	// TODO: This executions are for the HTTP Status Code 200
 	// TODO: Status code paymentrequired : This is where it would be that the local and sync expiration times mismatch gets caught
-	// TODO: Stop if the url is not configured for lightauth on server side
+	_url, err := url.Parse(u)
+	if err != nil {
+		log.Printf("Lightauth error: The URL is corrupted: %v\n", err)
+		return r, err
+	}
 
-	if r.StatusCode == http.StatusOK {
-		_url, err := url.Parse(u)
+	u = _url.Host + _url.Path
+
+	if _, exists := clientStore[u]; !exists {
+		return r, errors.New("Lightauth error: attempting to read a response that is not configured")
+	}
+
+	lightStatusCode, err := strconv.Atoi(readHeader(r.Header, "Light-Auth-Status"))
+	if err != nil {
+		log.Print(err)
+		return r, errors.New("Lightauth error: attempting to read invalid response")
+	}
+
+	store := clientStore[u]
+
+	invoices, err := getInvoicesFromResponse(r.Header)
+	if err != nil {
+		return r, err
+	}
+
+	for _, v := range invoices {
+		// TODO: This is inefficient (getInvoicesFromResponse already has paymentHash string)
+		paymentHash, err := getPaymentHash(v.PaymentRequest)
 		if err != nil {
-			log.Printf("Lightauth error: The URL is corrupted: %v\n", err)
-			return r, err
+			return r, errors.New("Lightauth error: server has sent invalid invoice")
 		}
 
-		u = _url.Host + _url.Path
-		store := clientStore[u]
+		if _, invoiceExists := store.Invoices[paymentHash]; !invoiceExists {
+			store.Invoices[paymentHash] = v
+			v.Path = store
+			v.save()
+		}
+	}
+
+	if lightStatusCode == http.StatusOK {
 
 		if store.Mode == "time" {
 			var err error
@@ -189,50 +227,23 @@ func ReadResponse(r *http.Response, u string) (*http.Response, error) {
 			}
 		}
 
-		fee, err := strconv.Atoi(readHeader(r.Header, "Light-Auth-Fee"))
-		if err != nil {
-			log.Printf("Lightauth error: Could not read header: %v\n", err)
-			return r, err
-		}
-
-		jsonData := []JSONInvoice{}
-		if err := json.Unmarshal([]byte(readHeader(r.Header, "Light-Auth-Invoices")), &jsonData); err != nil {
-			log.Printf("Lightauth error: Could not decode header data: %v\n", err)
-			return r, err
-		}
-
-		for _, v := range jsonData {
-			paymentHash, err := getPaymentHash(v.PaymentRequest)
-			if err != nil {
-				// TODO Server is sending invalid invoice.
-				continue
-			}
-
-			paymentHashByte, err := hex.DecodeString(paymentHash)
-			if err != nil {
-				continue
-			}
-
-			if _, invoiceExists := store.Invoices[paymentHash]; !invoiceExists {
-				i := &Invoice{
-					PaymentRequest: v.PaymentRequest,
-					Fee:            fee,
-					Path:           store,
-					PaymentHash:    paymentHashByte,
-					ExpirationTime: v.ExpirationTime,
-				}
-				i.save()
-
-				store.mux.Lock()
-				store.Invoices[paymentHash] = i
-				store.mux.Unlock()
-			}
-		}
-
 		return r, nil
+	} else if lightStatusCode == http.StatusBadRequest {
+		body, err := ioutil.ReadAll(r.Body)
+		if err != nil {
+			return r, errors.New("Lightauth error: could not read errored response body")
+		}
+
+		return r, errors.New(string(body))
+	} else if lightStatusCode == http.StatusConflict {
+		return r, errors.New("Lightauth error: conflict")
+	} else if lightStatusCode == http.StatusInternalServerError {
+		return r, errors.New("Lightauth error: internal server error")
+	} else if lightStatusCode == http.StatusPaymentRequired {
+		return r, errors.New("Lightauth error: payment required")
 	}
 
-	return r, errors.New("Lightauth: The response wasn't successful")
+	return r, errors.New("Lightauth error: The response status code is not recognised")
 }
 
 func getInvoicesFromResponse(h http.Header) (map[string]*Invoice, error) {
@@ -252,7 +263,7 @@ func getInvoicesFromResponse(h http.Header) (map[string]*Invoice, error) {
 	for _, v := range jsonData {
 		paymentHash, err := getPaymentHash(v.PaymentRequest)
 		if err != nil {
-			// TODO Server is sending invalid invoice.
+			// TODO Server is sending invalid invoice. EXCEPTIONAL
 			continue
 		}
 
@@ -267,8 +278,6 @@ func getInvoicesFromResponse(h http.Header) (map[string]*Invoice, error) {
 			PaymentHash:    paymentHashByte,
 			ExpirationTime: v.ExpirationTime,
 		}
-
-		invoices[paymentHash].save()
 	}
 
 	return invoices, nil
@@ -315,6 +324,7 @@ func ClearRequest(request *http.Request) (*http.Request, error) {
 
 		for _, v := range clientStore[url].Invoices {
 			v.Path = clientStore[url]
+			v.save()
 		}
 
 		if clientStore[url].Mode == "time" {
@@ -336,36 +346,38 @@ func ClearRequest(request *http.Request) (*http.Request, error) {
 	routeStore := clientStore[url]
 	request.Header.Set("Light-Auth-Token", routeStore.Token)
 
+	var flag bool
 	if routeStore.Mode == "time" {
-		if routeStore.SyncExpirationTime.Before(time.Now()) {
-			// TODO: This needs to configure buffer
-			for _, v := range routeStore.Invoices {
-				if !v.isSettled() {
-					err := makePayment(v)
-					if err != nil {
-						// TODO: We need to make sure at least one payment has been made
-						// Otherwise throw error
-					}
+		flag = routeStore.SyncExpirationTime.Before(time.Now())
+	} else {
+		flag = len(routeStore.getUnclaimedInvoices()) < 1
+	}
+
+	if flag {
+		madePayment := false
+		for _, v := range routeStore.Invoices {
+			if !v.isSettled() && !v.isExpired() {
+				err := makePayment(v)
+				if err != nil {
+					// TODO: Handle error, probably no balance error
 				}
+				madePayment = true
 			}
 		}
-	} else {
-		if len(routeStore.getUnclaimedInvoices()) < 1 {
-			// TODO: This needs to configure buffer
-			for _, v := range routeStore.Invoices {
-				if !v.isSettled() {
-					err := makePayment(v)
-					if err != nil {
-						// TODO: We need to make sure at least one payment has been made
-					}
-				}
-			}
+		if !madePayment {
+			// generateInvoices
+			// Counting on the failed response to give new invoices
 		}
 	}
 
-	// TODO: Should insert a time check here too, to avoid long ass loops
+	startTime := time.Now()
 	for {
 		if routeStore.canRequest() {
+			break
+		}
+
+		if time.Since(startTime) > time.Millisecond*time.Duration(lOOPTHRESHOLD) {
+			// return request, errors.New("Lightauth error: something went wrong (the time loop lasted longer than threshold)")
 			break
 		}
 	}
@@ -373,7 +385,7 @@ func ClearRequest(request *http.Request) (*http.Request, error) {
 	if routeStore.Mode == "discrete" {
 		found := false
 		for _, v := range routeStore.Invoices {
-			if v.isSettled() && !v.isClaimed() && !v.isExpired() {
+			if v.isSettled() && !v.isClaimed() {
 				preImage := hex.EncodeToString(v.PreImage)
 				request.Header.Set("Light-Auth-Pre-Image", preImage)
 				request.Header.Set("Light-Auth-Invoice", v.PaymentRequest)

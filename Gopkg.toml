@@ -21,9 +21,17 @@
 
 
 [[constraint]]
+  name = "github.com/BurntSushi/toml"
+  version = "0.3.0"
+
+[[constraint]]
+  branch = "master"
+  name = "github.com/dchest/uniuri"
+
+[[constraint]]
   name = "github.com/lightningnetwork/lnd"
   version = "0.3.0-alpha"
 
 [[constraint]]
   name = "google.golang.org/grpc"
-  version = "1.9.2"
+  version = "1.10.0"
