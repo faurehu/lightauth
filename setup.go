@@ -59,6 +59,7 @@ func startRPCClient() tomlConfig {
 	}
 
 	log.Print(conf)
+	log.Print("hello")
 
 	var opts []grpc.DialOption
 
