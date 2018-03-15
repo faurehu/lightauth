@@ -30,7 +30,7 @@
 
 [[constraint]]
   name = "github.com/lightningnetwork/lnd"
-  version = "0.3.0-alpha"
+  version = "^0.3.0-alpha"
 
 [[constraint]]
   name = "google.golang.org/grpc"
