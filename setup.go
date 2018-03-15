@@ -125,6 +125,7 @@ func StartClientConnection(db DataProvider) *grpc.ClientConn {
 // It requires lightauth.toml to be populated with the connection params and
 // the routes.
 func StartServerConnection(db DataProvider) *grpc.ClientConn {
+	log.Print("HELLOhere")
 	database = db
 	conf := startRPCClient()
 
@@ -150,7 +151,6 @@ func StartServerConnection(db DataProvider) *grpc.ClientConn {
 
 			err := r.save()
 			if err != nil {
-				fmt.Println("Here")
 				os.Exit(1)
 			}
 
