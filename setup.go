@@ -156,7 +156,7 @@ func StartServerConnection(db DataProvider) *grpc.ClientConn {
 	ctxb := context.Background()
 	lightningServerStream, err = lightningClient.SubscribeInvoices(ctxb, &lnrpc.InvoiceSubscription{})
 	if err != nil {
-		log.Fatalf("Lightauth error: Failed to start lightning client stream: %v\n", conf)
+		log.Fatalf("Lightauth error: Failed to start lightning client stream: %v\n%v\n", conf, err)
 	}
 
 	go func() {
