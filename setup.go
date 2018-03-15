@@ -58,9 +58,6 @@ func startRPCClient() tomlConfig {
 		log.Fatalf("Lightauth error: Could not parse lightauth.toml: %v\n", err)
 	}
 
-	log.Print(conf)
-	log.Print("hello")
-
 	var opts []grpc.DialOption
 
 	creds, err := credentials.NewClientTLSFromFile(conf.CAFile, conf.ServerHostOverride)
@@ -125,7 +122,6 @@ func StartClientConnection(db DataProvider) *grpc.ClientConn {
 // It requires lightauth.toml to be populated with the connection params and
 // the routes.
 func StartServerConnection(db DataProvider) *grpc.ClientConn {
-	log.Print("HELLOhere")
 	database = db
 	conf := startRPCClient()
 
@@ -161,7 +157,7 @@ func StartServerConnection(db DataProvider) *grpc.ClientConn {
 	ctxb := context.Background()
 	lightningServerStream, err = lightningClient.SubscribeInvoices(ctxb, &lnrpc.InvoiceSubscription{})
 	if err != nil {
-		log.Fatalf("Lightauth error: Failed to start lightning client stream: %v\n", err)
+		log.Fatalf("Lightauth error: Failed to start lightning client stream: %v\n", conf)
 	}
 
 	go func() {
