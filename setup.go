@@ -141,7 +141,7 @@ func StartClientConnection(db DataProvider) *grpc.ClientConn {
 // the routes.
 func StartServerConnection(db DataProvider) *grpc.ClientConn {
 	database = db
-	conf, err := startRPCClient()
+	_, err := startRPCClient()
 	if err != nil {
 		log.Fatalf("Lightauth error: Failed to start client: %v\n", err)
 	}
