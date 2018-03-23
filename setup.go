@@ -48,6 +48,7 @@ type tomlConfig struct {
 	ServerAddr         string
 	CAFile             string
 	ServerHostOverride string
+	MacaroonPath       string
 	Routes             map[string]*RouteInfo
 }
 
@@ -65,6 +66,21 @@ func startRPCClient() tomlConfig {
 	}
 
 	opts = append(opts, grpc.WithTransportCredentials(creds))
+
+	b, err := ioutil.ReadFile(conf.MacaroonPath)
+	if err != nil {
+		fmt.Print(err)
+		return conf, err
+	}
+
+	mac := &macaroon.Macaroon{}
+	if err = mac.UnmarshalBinary(b); err != nil {
+		fmt.Print(err)
+		return conf, err
+	}
+
+	cred := macaroons.NewMacaroonCredential(mac)
+	opts = append(opts, grpc.WithPerRPCCredentials(cred))
 
 	conn, err = grpc.Dial(conf.ServerAddr, opts...)
 	if err != nil {
