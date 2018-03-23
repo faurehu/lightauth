@@ -2,7 +2,10 @@ package lightauth
 
 import (
 	"context"
+	"github.com/lightningnetwork/lnd/macaroons"
+	"gopkg.in/macaroon.v2"
 	"io"
+	"io/ioutil"
 	"log"
 	"os"
 
@@ -52,7 +55,7 @@ type tomlConfig struct {
 	Routes             map[string]*RouteInfo
 }
 
-func startRPCClient() tomlConfig {
+func startRPCClient() (tomlConfig, error) {
 	var conf tomlConfig
 	if _, err := toml.DecodeFile("lightauth.toml", &conf); err != nil {
 		log.Fatalf("Lightauth error: Could not parse lightauth.toml: %v\n", err)
@@ -69,7 +72,6 @@ func startRPCClient() tomlConfig {
 
 	b, err := ioutil.ReadFile(conf.MacaroonPath)
 	if err != nil {
-		fmt.Print(err)
 		return conf, err
 	}
 
@@ -89,13 +91,16 @@ func startRPCClient() tomlConfig {
 
 	lightningClient = lnrpc.NewLightningClient(conn)
 
-	return conf
+	return conf, nil
 }
 
 // StartClientConnection is used to initiate the connection with the LDN node on a client's behalf.
 func StartClientConnection(db DataProvider) *grpc.ClientConn {
 	database = db
-	startRPCClient()
+	conf, err := startRPCClient()
+	if err != nil {
+		log.Fatalf("Lightauth error: Failed to start client: %v\n", err)
+	}
 
 	var err error
 	clientStore, err = db.GetClientData()
@@ -138,7 +143,10 @@ func StartClientConnection(db DataProvider) *grpc.ClientConn {
 // the routes.
 func StartServerConnection(db DataProvider) *grpc.ClientConn {
 	database = db
-	conf := startRPCClient()
+	conf, err := startRPCClient()
+	if err != nil {
+		log.Fatalf("Lightauth error: Failed to start client: %v\n", err)
+	}
 
 	var err error
 	serverStore, err = db.GetServerData()
