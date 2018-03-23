@@ -77,7 +77,6 @@ func startRPCClient() (tomlConfig, error) {
 
 	mac := &macaroon.Macaroon{}
 	if err = mac.UnmarshalBinary(b); err != nil {
-		fmt.Print(err)
 		return conf, err
 	}
 
@@ -102,7 +101,6 @@ func StartClientConnection(db DataProvider) *grpc.ClientConn {
 		log.Fatalf("Lightauth error: Failed to start client: %v\n", err)
 	}
 
-	var err error
 	clientStore, err = db.GetClientData()
 	if err != nil {
 		log.Fatalf("Lightauth error: could not fetch data from store: %v\n", err)
@@ -148,7 +146,6 @@ func StartServerConnection(db DataProvider) *grpc.ClientConn {
 		log.Fatalf("Lightauth error: Failed to start client: %v\n", err)
 	}
 
-	var err error
 	serverStore, err = db.GetServerData()
 	if err != nil {
 		log.Fatalf("Lightauth error: could not fetch data from store: %v\n", err)
