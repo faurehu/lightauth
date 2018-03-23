@@ -96,7 +96,7 @@ func startRPCClient() (tomlConfig, error) {
 // StartClientConnection is used to initiate the connection with the LDN node on a client's behalf.
 func StartClientConnection(db DataProvider) *grpc.ClientConn {
 	database = db
-	conf, err := startRPCClient()
+	_, err := startRPCClient()
 	if err != nil {
 		log.Fatalf("Lightauth error: Failed to start client: %v\n", err)
 	}
@@ -141,7 +141,7 @@ func StartClientConnection(db DataProvider) *grpc.ClientConn {
 // the routes.
 func StartServerConnection(db DataProvider) *grpc.ClientConn {
 	database = db
-	_, err := startRPCClient()
+	conf, err := startRPCClient()
 	if err != nil {
 		log.Fatalf("Lightauth error: Failed to start client: %v\n", err)
 	}
